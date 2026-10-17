@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  bitcoind:
+    image: lncm/bitcoind:v26.0
+    container_name: brc20_bitcoind
+    command: >
+      bitcoind
+      -regtest=1
+      -txindex=1
+      -server=1
+      -rpcuser=${BITCOIN_RPC_USER:-bitcoinrpc}
+      -rpcpassword=${BITCOIN_RPC_PASSWORD:-bitcoinrpc_password}
+      -rpcbind=0.0.0.0
+      -rpcallowip=0.0.0.0/0
+      -fallbackfee=0.0002
+      -minrelaytxfee=0.0
+      -mintxfee=0.0
+      -printtoconsole=1
+      -debug=rpc
+    ports:
+      - "18443:18443"
+      - "18444:18444"
+    volumes:
+      - bitcoin_data:/data/.bitcoin
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest",
+             "-rpcuser=${BITCOIN_RPC_USER:-bitcoinrpc}",
+             "-rpcpassword=${BITCOIN_RPC_PASSWORD:-bitcoinrpc_password}",
+             "-rpcconnect=127.0.0.1",
+             "getblockchaininfo"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    networks:
+      - brc20_net
+
+  db:
+    image: postgres:15-alpine
+    container_name: brc20_postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-brc20user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-brc20password}
+      POSTGRES_DB: ${DB_NAME:-brc20indexer}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-brc20user} -d ${DB_NAME:-brc20indexer}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - brc20_net
+
+  indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: brc20_indexer
+    environment:
+      - BITCOIN_RPC_HOST=${BITCOIN_RPC_HOST:-bitcoind}
+      - BITCOIN_RPC_PORT=${BITCOIN_RPC_PORT:-18443}
+      - BITCOIN_RPC_USER=${BITCOIN_RPC_USER:-bitcoinrpc}
+      - BITCOIN_RPC_PASSWORD=${BITCOIN_RPC_PASSWORD:-bitcoinrpc_password}
+      - DB_HOST=${DB_HOST:-db}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_USER=${DB_USER:-brc20user}
+      - DB_PASSWORD=${DB_PASSWORD:-brc20password}
+      - DB_NAME=${DB_NAME:-brc20indexer}
+      - API_PORT=${API_PORT:-3000}
+      - API_HOST=${API_HOST:-0.0.0.0}
+      - INDEXER_START_HEIGHT=${INDEXER_START_HEIGHT:-0}
+      - INDEXER_POLL_INTERVAL_MS=${INDEXER_POLL_INTERVAL_MS:-2000}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - NODE_ENV=${NODE_ENV:-production}
+    ports:
+      - "${API_PORT:-3000}:${API_PORT:-3000}"
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:${API_PORT:-3000}/health', (r)=>{ process.exit(r.statusCode===200?0:1) }).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - brc20_net
+
+volumes:
+  bitcoin_data:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  brc20_net:
+    driver: bridge
